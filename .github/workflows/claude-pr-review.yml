@@ -64,6 +64,7 @@ jobs:
         with:
           # this one ALWAYS runs the prompt — no trigger needed
           prompt: |
+            <!-- claude-code-review -->
             You are a senior code reviewer. Review the following pull request diff.
             Review the changes in my current git diff (staged and unstaged changes) focusing on these areas:
 
@@ -168,3 +169,44 @@ jobs:
               issue_number: prNumber,
               body
             });
+
+      - name: Post / update Claude review comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const marker = '<!-- claude-pr-review -->';
+            const b64 = `${{ steps.read_claude.outputs.review_b64 }}`.trim();
+            const review = Buffer.from(b64, 'base64').toString('utf8').trim();
+
+            // 1- get existing comments
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber
+            });
+
+            // 2- collapse any older Claude comments (optional)
+            for (const c of comments) {
+              if (c.body && c.body.includes(marker) && !c.body.startsWith('<details>')) {
+                const collapsed = `<details>\n<summary>Previous Claude review (${c.created_at})</summary>\n\n${c.body}\n</details>`;
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: c.id,
+                  body: collapsed
+                });
+              }
+            }
+
+            // 3- see if we already have a "live" comment (after collapsing, we won't — so just create)
+            const body = `${marker}\n${review || "Claude ran but didn't return a review."}`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body
+            });
+

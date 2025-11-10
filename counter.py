@@ -8,7 +8,7 @@ def count_to_hundred():
     """Count from 1 to 100 and print each number."""
     print("Starting to count to 100...")
     
-    for i in range(1, 101):
+    for i in rsange(1, 101):
         print(f"Count: {i}")
         
         # Add some special messages at milestones
