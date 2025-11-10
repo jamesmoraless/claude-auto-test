@@ -1,0 +1,103 @@
+name: Claude PR Review
+
+on:
+  pull_request:
+    types: [opened, reopened, edited, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  claude-review:
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    
+    steps:
+    - name: Checkout PR code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Get diff against base
+      id: diff
+      run: |
+        git fetch origin ${{ github.base_ref }} --depth=1
+        git diff origin/${{ github.base_ref }}...HEAD > pr.diff
+        echo "diff_path=pr.diff" >> $GITHUB_OUTPUT
+    
+    - name: Build prompt for Claude
+      id: prompt
+      run: |
+        cat << 'EOF' > prompt.txt
+        You are an AI code reviewer for Tempo. Review the following PR diff.
+        
+        Goals:
+        1. Spot obvious bugs, security issues, or breaking changes.
+        2. Flag missing tests if logic is non-trivial.
+        3. Keep feedback concise and actionable.
+        
+        Return Markdown with:
+        - Summary
+        - Potential Issues  
+        - Suggestions
+        - Tests to Add
+        
+        Here is the diff:
+        EOF
+        cat pr.diff >> prompt.txt
+        echo "prompt_path=prompt.txt" >> $GITHUB_OUTPUT
+    
+    - name: Call Claude
+      id: claude
+      run: |
+        PROMPT_CONTENT=$(cat prompt.txt)
+        RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+          -H "x-api-key: $ANTHROPIC_API_KEY" \
+          -H "anthropic-version: 2023-06-01" \
+          -H "content-type: application/json" \
+          -d @- <<EOF
+        {
+          "model": "claude-3-5-sonnet-latest",
+          "max_tokens": 1200,
+          "messages": [
+            {
+              "role": "user",
+              "content": "$PROMPT_CONTENT"
+            }
+          ]
+        }
+        EOF
+        )
+        echo "$RESPONSE" > claude_raw.json
+        REVIEW=$(python - << 'PYCODE'
+        import json
+        with open("claude_raw.json") as f:
+            data = json.load(f)
+        text_parts = []
+        for c in data.get("content", []):
+            if c.get("type") == "text":
+                text_parts.append(c.get("text",""))
+        print("\n".join(text_parts))
+        PYCODE
+        )
+        echo "$REVIEW" > claude_review.md
+        REVIEW_ESCAPED=$(python - << 'PYCODE'
+        import json
+        text = open("claude_review.md").read()
+        print(json.dumps(text))
+        PYCODE
+        )
+        echo "review=$REVIEW_ESCAPED" >> $GITHUB_OUTPUT
+    
+    - name: Comment on PR
+      run: |
+        PR_NUMBER=${{ github.event.pull_request.number }}
+        REVIEW_BODY=$(cat claude_review.md)
+        curl -s -X POST \
+          -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+          -H "Accept: application/vnd.github+json" \
+          https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+          -d "$(jq -n --arg body "$REVIEW_BODY" '{body: $body}')"
