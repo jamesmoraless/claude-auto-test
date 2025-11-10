@@ -7,13 +7,10 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  issues: write
 
 jobs:
   claude-review:
     runs-on: ubuntu-latest
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
     steps:
       - name: Checkout PR code
@@ -22,127 +19,72 @@ jobs:
           fetch-depth: 0
 
       - name: Get diff against base
-        id: diff
+        id: get_diff
         run: |
           git fetch origin ${{ github.base_ref }} --depth=1
           git diff origin/${{ github.base_ref }}...HEAD > pr.diff
-          echo "diff_path=pr.diff" >> $GITHUB_OUTPUT
 
-      - name: Truncate diff if too large
-        run: |
-          MAX_SIZE=100000  # ~100KB
+          # truncate for safety
+          MAX_SIZE=100000
           if [ $(wc -c < pr.diff) -gt $MAX_SIZE ]; then
-            echo "⚠️ Diff too large, truncating to $MAX_SIZE bytes..."
-            head -c $MAX_SIZE pr.diff > truncated.diff
-            mv truncated.diff pr.diff
+            echo "⚠️ Diff too large, truncating..."
+            head -c $MAX_SIZE pr.diff > pr.truncated.diff
+            mv pr.truncated.diff pr.diff
           fi
 
-      - name: Build prompt for Claude
-        id: prompt
-        run: |
-          cat << 'EOF' > prompt.txt
-          Review the changes in this pull request diff (this is the code that changed between the PR branch and the base branch) focusing on these areas:
+          # expose diff as output (multi-line)
+          echo "diff<<EOF" >> $GITHUB_OUTPUT
+          cat pr.diff >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
-          1. Code Quality & Best Practices
-            - Are there any violations of common coding standards or patterns?
-            - Is the code readable, maintainable, and properly organized?
-            - Are variable/function names clear and descriptive?
-            - Is there any duplicated code that could be refactored?
-
-          2. Potential Bugs or Issues
-            - Are there any logical errors or edge cases not handled?
-            - Are null/undefined checks in place where needed?
-            - Are there any type mismatches or incorrect assumptions?
-            - Are error conditions properly handled?
-
-          3. Performance Considerations
-            - Are there any inefficient algorithms or data structures?
-            - For frontend changes, are there unnecessary re-renders?
-            - Could any operations be optimized or cached?
-
-          4. Security Concerns
-            - Is user input properly validated and sanitized?
-            - Are there any exposed sensitive data or credentials?
-            - Are API endpoints properly authenticated/authorized?
-            - Are there any potential injection vulnerabilities?
-
-          5. Test Coverage
-            - Are the changes adequately tested?
-            - Are edge cases covered in tests?
-            - Do the tests actually verify the intended behavior?
-            - Are there any untested code paths?
-
-          Please provide constructive, specific feedback. For each issue found, explain why it's a problem and suggest how to fix it. Prioritize the most critical issues first.
-
-          Here is the PR diff:
-          EOF
-                    cat pr.diff >> prompt.txt
-                    echo "prompt_path=prompt.txt" >> $GITHUB_OUTPUT
-
-      - name: Call Claude
+      - name: Generate review with Claude
         id: claude
-        run: |
-          # 1 Build a proper JSON request file in Python
-          python - << 'PYCODE'
-          import json
-          from pathlib import Path
+        continue-on-error: true
+        uses: anthropics/claude-code-action@beta
+        env:
+          MODE: agent
+        with:
+          mode: agent
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          trigger_phrase: ""
+          label_trigger: ""
+          direct_prompt: |
+            You are a senior code reviewer. Review the following pull request diff.
+            Focus on:
+            1. Code Quality & Best Practices
+            2. Potential Bugs or Issues
+            3. Performance considerations
+            4. Security concerns
+            5. Test coverage gaps
 
-          prompt = Path("prompt.txt").read_text(encoding="utf-8")
+            For each issue, explain why it's a problem and how to fix it.
+            Prioritize critical issues first.
+            Return Markdown.
 
-          body = {
-              "model": "claude-3-5-sonnet-latest",
-              "max_tokens": 1200,
-              "messages": [
-                  {
-                      "role": "user",
-                      "content": prompt
-                  }
-              ]
-          }
+            --- BEGIN DIFF ---
+            ${{ steps.get_diff.outputs.diff }}
+            --- END DIFF ---
 
-          Path("request.json").write_text(json.dumps(body), encoding="utf-8")
-          PYCODE
+      - name: Comment on PR with review
+        uses: actions/github-script@v7
+        with:
+            github-token: ${{ secrets.GITHUB_TOKEN }}
+            script: |
+              const prNumber = context.payload.pull_request.number;
+              // the anthropics action usually returns something in 'steps.claude.outputs.result'
+              let body = core.getInput('body', { required: false });
+              // but we'll prefer the action's output
+              const claudeOutput = `${{ toJSON(steps.claude.outputs.result) }}`.trim();
+              let commentBody = claudeOutput;
 
-          # 2) Send that JSON file to Anthropic
-          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
-            -H "x-api-key: $ANTHROPIC_API_KEY" \
-            -H "anthropic-version: 2023-06-01" \
-            -H "content-type: application/json" \
-            --data-binary @request.json)
+              if (!claudeOutput || claudeOutput === 'null' || claudeOutput === '""') {
+                commentBody = "Claude ran but didn't return a review. Check workflow logs.";
+              }
 
-          echo "$RESPONSE" > claude_raw.json
-
-          # 3) Extract text safely (or fall back)
-          python - << 'PYCODE'
-          import json, pathlib
-          data = json.loads(pathlib.Path("claude_raw.json").read_text(encoding="utf-8"))
-          text_parts = []
-          for c in data.get("content", []):
-              if c.get("type") == "text":
-                  text_parts.append(c.get("text",""))
-          text = "\n".join(text_parts).strip()
-          if not text:
-              # if Anthropic sent an error, write it so GH can comment with it
-              text = "Claude API returned an error:\n```json\n" + json.dumps(data, indent=2) + "\n```"
-          pathlib.Path("claude_review.md").write_text(text, encoding="utf-8")
-          PYCODE
-
-      - name: Comment on PR
-        run: |
-          PR_NUMBER=${{ github.event.pull_request.number }}
-          REVIEW_BODY=$(cat claude_review.md)
-
-          if [ -z "$REVIEW_BODY" ]; then
-            REVIEW_BODY="Claude ran but the review body was empty. Check claude_raw.json in the workflow artifacts/logs."
-          fi
-
-          curl -s -X POST \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-            -d "$(jq -n --arg body "$REVIEW_BODY" '{body: $body}')"
-        
-      - name: Debug Claude response
-        run: |
-          echo "===== Claude raw response ====="
-          cat claude_raw.json
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: commentBody
+              });
