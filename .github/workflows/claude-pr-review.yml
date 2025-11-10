@@ -104,10 +104,11 @@ jobs:
         id: read_claude
         run: |
           FILE="/home/runner/work/_temp/claude-execution-output.json"
+          OUTFILE="claude_review.md"
           DEFAULT_MSG="Claude ran but didn't return a review. Check workflow logs."
 
           python - << 'PY'
-          import json, os, pathlib, sys
+          import json, os, pathlib
 
           file_path = "/home/runner/work/_temp/claude-execution-output.json"
           out_path = "claude_review.md"
@@ -119,7 +120,6 @@ jobs:
               if isinstance(data, list):
                   for item in data:
                       if isinstance(item, dict) and item.get("type") == "result":
-                          # this is the final markdown Claude wrote
                           text = item.get("result", "").strip()
               elif isinstance(data, dict) and data.get("type") == "result":
                   text = data.get("result", "").strip()
@@ -130,9 +130,9 @@ jobs:
           pathlib.Path(out_path).write_text(text, encoding="utf-8")
           PY
 
-          echo "review<<EOF" >> $GITHUB_OUTPUT
-          cat claude_review.md >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          # now safely base64 it so we can pass via outputs
+          REVIEW_B64=$(base64 -w 0 claude_review.md)
+          echo "review_b64=${REVIEW_B64}" >> $GITHUB_OUTPUT
 
       - name: Comment on PR with review
         uses: actions/github-script@v7
@@ -140,11 +140,13 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const prNumber = context.payload.pull_request.number;
-            // this is now just plain markdown text
-            const review = ${{ toJSON(steps.read_claude.outputs.review) }};
-            const body = (!review || review === "null" || review === '""')
-              ? "Claude ran but didn't return a review. Check workflow logs."
-              : review;
+            const b64 = `${{ steps.read_claude.outputs.review_b64 }}`.trim();
+
+            let body = "Claude ran but didn't return a review. Check workflow logs.";
+            if (b64 && b64 !== "null" && b64 !== '""') {
+              const buf = Buffer.from(b64, 'base64');
+              body = buf.toString('utf8').trim();
+            }
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
