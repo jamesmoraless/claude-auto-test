@@ -2,7 +2,20 @@ name: Claude PR Review
 
 on:
   pull_request:
-    types: [opened, reopened, edited, synchronize]
+    types: [opened, reopened, synchronize]
+    paths-ignore:
+      - "**.md"             # ignore documentation
+      - "**.MD"
+      - "**.txt"
+      - "**.json"           # skip metadata/config updates if you want
+      - "**/docs/**"
+      - "**/CHANGELOG*"
+      - "**/LICENSE*"
+      - "**/README*"
+      - "**/test/**"        # optionally skip pure test-only changes
+      - "**/tests/**"
+      - "**/fixtures/**"
+
 
 permissions:
   contents: read
@@ -125,7 +138,8 @@ jobs:
                   text = data.get("result", "").strip()
 
           if not text:
-              text = "Claude ran but didn't return a review. Check workflow logs."
+              raw = open(file_path, "r", encoding="utf-8").read()[:200]
+              text = "Claude ran but didn't return a review.\n\nRaw snippet:\n```json\n" + raw + "\n```"
 
           pathlib.Path(out_path).write_text(text, encoding="utf-8")
           PY
