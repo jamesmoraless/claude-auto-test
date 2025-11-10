@@ -23,7 +23,7 @@ def count_to_hundred():
     
     return i
 
-def main():
+def min():
     """Main function to run the counter."""
     final_count = count_to_hundred()
     print(f"\nFinal count reached: {final_count}")
