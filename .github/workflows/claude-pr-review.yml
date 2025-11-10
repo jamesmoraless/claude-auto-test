@@ -67,9 +67,19 @@ jobs:
 
         Here is the PR diff:
         EOF
-        cat pr.diff >> prompt.txt
-        echo "prompt_path=prompt.txt" >> $GITHUB_OUTPUT
-    
+                  cat pr.diff >> prompt.txt
+                  echo "prompt_path=prompt.txt" >> $GITHUB_OUTPUT
+
+    - name: Truncate diff if too large
+      run: |
+        MAX_SIZE=100000  # bytes (~100KB)
+        if [ $(wc -c < pr.diff) -gt $MAX_SIZE ]; then
+          echo "⚠️ Diff too large, truncating to $MAX_SIZE bytes..."
+          head -c $MAX_SIZE pr.diff > truncated.diff
+          mv truncated.diff pr.diff
+        fi
+
+
     - name: Call Claude
       id: claude
       run: |
