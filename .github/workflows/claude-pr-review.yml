@@ -82,49 +82,49 @@ jobs:
       - name: Call Claude
         id: claude
         run: |
-          # read prompt and JSON-escape it
-          JSON_PROMPT=$(python - << 'PYCODE'
+          # 1 Build a proper JSON request file in Python
+          python - << 'PYCODE'
           import json
-          text = open("prompt.txt", "r", encoding="utf-8").read()
-          print(json.dumps(text))
-          PYCODE
-          )
+          from pathlib import Path
 
-                    RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
-                      -H "x-api-key: $ANTHROPIC_API_KEY" \
-                      -H "anthropic-version: 2023-06-01" \
-                      -H "content-type: application/json" \
-                      -d @- <<EOF
-          {
-            "model": "claude-3-5-sonnet-latest",
-            "max_tokens": 1200,
-            "messages": [
-              {
-                "role": "user",
-                "content": $JSON_PROMPT
-              }
-            ]
+          prompt = Path("prompt.txt").read_text(encoding="utf-8")
+
+          body = {
+              "model": "claude-3-5-sonnet-latest",
+              "max_tokens": 1200,
+              "messages": [
+                  {
+                      "role": "user",
+                      "content": prompt
+                  }
+              ]
           }
-          EOF
-          )
 
-          # save raw response so we can debug
+          Path("request.json").write_text(json.dumps(body), encoding="utf-8")
+          PYCODE
+
+          # 2) Send that JSON file to Anthropic
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            --data-binary @request.json)
+
           echo "$RESPONSE" > claude_raw.json
 
-          # try to extract text
+          # 3) Extract text safely (or fall back)
           python - << 'PYCODE'
-
-          import json, sys
-          data = json.load(open("claude_raw.json", "r", encoding="utf-8"))
+          import json, pathlib
+          data = json.loads(pathlib.Path("claude_raw.json").read_text(encoding="utf-8"))
           text_parts = []
           for c in data.get("content", []):
               if c.get("type") == "text":
                   text_parts.append(c.get("text",""))
           text = "\n".join(text_parts).strip()
           if not text:
-              # fall back to dumping the whole response so GitHub comment isn't empty
-              text = "Claude ran but did not return text content. Raw response:\n```json\n" + json.dumps(data, indent=2) + "\n```"
-          open("claude_review.md", "w", encoding="utf-8").write(text)
+              # if Anthropic sent an error, write it so GH can comment with it
+              text = "Claude API returned an error:\n```json\n" + json.dumps(data, indent=2) + "\n```"
+          pathlib.Path("claude_review.md").write_text(text, encoding="utf-8")
           PYCODE
 
       - name: Comment on PR
