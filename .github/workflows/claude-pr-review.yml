@@ -32,20 +32,40 @@ jobs:
       id: prompt
       run: |
         cat << 'EOF' > prompt.txt
-        You are an AI code reviewer for Tempo. Review the following PR diff.
-        
-        Goals:
-        1. Spot obvious bugs, security issues, or breaking changes.
-        2. Flag missing tests if logic is non-trivial.
-        3. Keep feedback concise and actionable.
-        
-        Return Markdown with:
-        - Summary
-        - Potential Issues  
-        - Suggestions
-        - Tests to Add
-        
-        Here is the diff:
+        Review the changes in this pull request diff (this is the code that changed between the PR branch and the base branch) focusing on these areas:
+
+        1. Code Quality & Best Practices
+          - Are there any violations of common coding standards or patterns?
+          - Is the code readable, maintainable, and properly organized?
+          - Are variable/function names clear and descriptive?
+          - Is there any duplicated code that could be refactored?
+
+        2. Potential Bugs or Issues
+          - Are there any logical errors or edge cases not handled?
+          - Are null/undefined checks in place where needed?
+          - Are there any type mismatches or incorrect assumptions?
+          - Are error conditions properly handled?
+
+        3. Performance Considerations
+          - Are there any inefficient algorithms or data structures?
+          - For frontend changes, are there unnecessary re-renders?
+          - Could any operations be optimized or cached?
+
+        4. Security Concerns
+          - Is user input properly validated and sanitized?
+          - Are there any exposed sensitive data or credentials?
+          - Are API endpoints properly authenticated/authorized?
+          - Are there any potential injection vulnerabilities?
+
+        5. Test Coverage
+          - Are the changes adequately tested?
+          - Are edge cases covered in tests?
+          - Do the tests actually verify the intended behavior?
+          - Are there any untested code paths?
+
+        Please provide constructive, specific feedback. For each issue found, explain why it's a problem and suggest how to fix it. Prioritize the most critical issues first.
+
+        Here is the PR diff:
         EOF
         cat pr.diff >> prompt.txt
         echo "prompt_path=prompt.txt" >> $GITHUB_OUTPUT
