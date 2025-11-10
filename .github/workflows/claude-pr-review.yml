@@ -14,120 +14,135 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-    
+
     steps:
-    - name: Checkout PR code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-    
-    - name: Get diff against base
-      id: diff
-      run: |
-        git fetch origin ${{ github.base_ref }} --depth=1
-        git diff origin/${{ github.base_ref }}...HEAD > pr.diff
-        echo "diff_path=pr.diff" >> $GITHUB_OUTPUT
-    
-    - name: Build prompt for Claude
-      id: prompt
-      run: |
-        cat << 'EOF' > prompt.txt
-        Review the changes in this pull request diff (this is the code that changed between the PR branch and the base branch) focusing on these areas:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-        1. Code Quality & Best Practices
-          - Are there any violations of common coding standards or patterns?
-          - Is the code readable, maintainable, and properly organized?
-          - Are variable/function names clear and descriptive?
-          - Is there any duplicated code that could be refactored?
+      - name: Get diff against base
+        id: diff
+        run: |
+          git fetch origin ${{ github.base_ref }} --depth=1
+          git diff origin/${{ github.base_ref }}...HEAD > pr.diff
+          echo "diff_path=pr.diff" >> $GITHUB_OUTPUT
 
-        2. Potential Bugs or Issues
-          - Are there any logical errors or edge cases not handled?
-          - Are null/undefined checks in place where needed?
-          - Are there any type mismatches or incorrect assumptions?
-          - Are error conditions properly handled?
+      - name: Truncate diff if too large
+        run: |
+          MAX_SIZE=100000  # ~100KB
+          if [ $(wc -c < pr.diff) -gt $MAX_SIZE ]; then
+            echo "⚠️ Diff too large, truncating to $MAX_SIZE bytes..."
+            head -c $MAX_SIZE pr.diff > truncated.diff
+            mv truncated.diff pr.diff
+          fi
 
-        3. Performance Considerations
-          - Are there any inefficient algorithms or data structures?
-          - For frontend changes, are there unnecessary re-renders?
-          - Could any operations be optimized or cached?
+      - name: Build prompt for Claude
+        id: prompt
+        run: |
+          cat << 'EOF' > prompt.txt
+          Review the changes in this pull request diff (this is the code that changed between the PR branch and the base branch) focusing on these areas:
 
-        4. Security Concerns
-          - Is user input properly validated and sanitized?
-          - Are there any exposed sensitive data or credentials?
-          - Are API endpoints properly authenticated/authorized?
-          - Are there any potential injection vulnerabilities?
+          1. Code Quality & Best Practices
+            - Are there any violations of common coding standards or patterns?
+            - Is the code readable, maintainable, and properly organized?
+            - Are variable/function names clear and descriptive?
+            - Is there any duplicated code that could be refactored?
 
-        5. Test Coverage
-          - Are the changes adequately tested?
-          - Are edge cases covered in tests?
-          - Do the tests actually verify the intended behavior?
-          - Are there any untested code paths?
+          2. Potential Bugs or Issues
+            - Are there any logical errors or edge cases not handled?
+            - Are null/undefined checks in place where needed?
+            - Are there any type mismatches or incorrect assumptions?
+            - Are error conditions properly handled?
 
-        Please provide constructive, specific feedback. For each issue found, explain why it's a problem and suggest how to fix it. Prioritize the most critical issues first.
+          3. Performance Considerations
+            - Are there any inefficient algorithms or data structures?
+            - For frontend changes, are there unnecessary re-renders?
+            - Could any operations be optimized or cached?
 
-        Here is the PR diff:
-        EOF
-                  cat pr.diff >> prompt.txt
-                  echo "prompt_path=prompt.txt" >> $GITHUB_OUTPUT
+          4. Security Concerns
+            - Is user input properly validated and sanitized?
+            - Are there any exposed sensitive data or credentials?
+            - Are API endpoints properly authenticated/authorized?
+            - Are there any potential injection vulnerabilities?
 
-    - name: Truncate diff if too large
-      run: |
-        MAX_SIZE=100000  # bytes (~100KB)
-        if [ $(wc -c < pr.diff) -gt $MAX_SIZE ]; then
-          echo "⚠️ Diff too large, truncating to $MAX_SIZE bytes..."
-          head -c $MAX_SIZE pr.diff > truncated.diff
-          mv truncated.diff pr.diff
-        fi
+          5. Test Coverage
+            - Are the changes adequately tested?
+            - Are edge cases covered in tests?
+            - Do the tests actually verify the intended behavior?
+            - Are there any untested code paths?
 
+          Please provide constructive, specific feedback. For each issue found, explain why it's a problem and suggest how to fix it. Prioritize the most critical issues first.
 
-    - name: Call Claude
-      id: claude
-      run: |
-        PROMPT_CONTENT=$(cat prompt.txt)
-        RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
-          -H "x-api-key: $ANTHROPIC_API_KEY" \
-          -H "anthropic-version: 2023-06-01" \
-          -H "content-type: application/json" \
-          -d @- <<EOF
-        {
-          "model": "claude-3-5-sonnet-latest",
-          "max_tokens": 1200,
-          "messages": [
-            {
-              "role": "user",
-              "content": "$PROMPT_CONTENT"
-            }
-          ]
-        }
-        EOF
-        )
-        echo "$RESPONSE" > claude_raw.json
-        REVIEW=$(python - << 'PYCODE'
-        import json
-        with open("claude_raw.json") as f:
-            data = json.load(f)
-        text_parts = []
-        for c in data.get("content", []):
-            if c.get("type") == "text":
-                text_parts.append(c.get("text",""))
-        print("\n".join(text_parts))
-        PYCODE
-        )
-        echo "$REVIEW" > claude_review.md
-        REVIEW_ESCAPED=$(python - << 'PYCODE'
-        import json
-        text = open("claude_review.md").read()
-        print(json.dumps(text))
-        PYCODE
-        )
-        echo "review=$REVIEW_ESCAPED" >> $GITHUB_OUTPUT
-    
-    - name: Comment on PR
-      run: |
-        PR_NUMBER=${{ github.event.pull_request.number }}
-        REVIEW_BODY=$(cat claude_review.md)
-        curl -s -X POST \
-          -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-          -H "Accept: application/vnd.github+json" \
-          https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-          -d "$(jq -n --arg body "$REVIEW_BODY" '{body: $body}')"
+          Here is the PR diff:
+          EOF
+                    cat pr.diff >> prompt.txt
+                    echo "prompt_path=prompt.txt" >> $GITHUB_OUTPUT
+
+      - name: Call Claude
+        id: claude
+        run: |
+          # read prompt and JSON-escape it
+          JSON_PROMPT=$(python - << 'PYCODE'
+          import json
+          text = open("prompt.txt", "r", encoding="utf-8").read()
+          print(json.dumps(text))
+          PYCODE
+          )
+
+                    RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+                      -H "x-api-key: $ANTHROPIC_API_KEY" \
+                      -H "anthropic-version: 2023-06-01" \
+                      -H "content-type: application/json" \
+                      -d @- <<EOF
+          {
+            "model": "claude-3-5-sonnet-latest",
+            "max_tokens": 1200,
+            "messages": [
+              {
+                "role": "user",
+                "content": $JSON_PROMPT
+              }
+            ]
+          }
+          EOF
+          )
+
+          # save raw response so we can debug
+          echo "$RESPONSE" > claude_raw.json
+
+          # try to extract text
+          python - << 'PYCODE'
+
+          import json, sys
+          data = json.load(open("claude_raw.json", "r", encoding="utf-8"))
+          text_parts = []
+          for c in data.get("content", []):
+              if c.get("type") == "text":
+                  text_parts.append(c.get("text",""))
+          text = "\n".join(text_parts).strip()
+          if not text:
+              # fall back to dumping the whole response so GitHub comment isn't empty
+              text = "Claude ran but did not return text content. Raw response:\n```json\n" + json.dumps(data, indent=2) + "\n```"
+          open("claude_review.md", "w", encoding="utf-8").write(text)
+          PYCODE
+
+      - name: Comment on PR
+        run: |
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          REVIEW_BODY=$(cat claude_review.md)
+
+          if [ -z "$REVIEW_BODY" ]; then
+            REVIEW_BODY="Claude ran but the review body was empty. Check claude_raw.json in the workflow artifacts/logs."
+          fi
+
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
+            -d "$(jq -n --arg body "$REVIEW_BODY" '{body: $body}')"
+        
+      - name: Debug Claude response
+        run: |
+          echo "===== Claude raw response ====="
+          cat claude_raw.json
