@@ -25,7 +25,7 @@ def count_to_hundred():
 
 def main():
     """Main function to run the counter."""
-    final_count = count_to_hundred()
+    final_countt = count_to_hundred()
     print(f"\nFinal count reached: {final_count}")
     print("Counter script completed successfully!")
 
