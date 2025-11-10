@@ -170,6 +170,11 @@ jobs:
             // 2- collapse any older Claude comments (optional)
             for (const c of comments) {
               if (c.body && c.body.includes(marker) && !c.body.startsWith('<details>')) {
+                  const formattedDate = new Date(c.created_at).toLocaleDateString('en-US', {
+                  month: '2-digit',
+                  day: '2-digit',
+                  year: 'numeric'
+                });
                 const collapsed = `<details>\n<summary>Previous Claude review (${c.created_at})</summary>\n\n${c.body}\n</details>`;
                 await github.rest.issues.updateComment({
                   owner: context.repo.owner,
