@@ -26,108 +26,200 @@ jobs:
       run: |
         git fetch origin ${{ github.base_ref }} --depth=1
         git diff origin/${{ github.base_ref }}...HEAD > pr.diff
+        echo "Diff size: $(wc -l < pr.diff) lines"
+        echo "First 10 lines of diff:"
+        head -10 pr.diff
         echo "diff_path=pr.diff" >> $GITHUB_OUTPUT
     
     - name: Build prompt for Claude
       id: prompt
       run: |
         cat << 'EOF' > prompt.txt
-        Review the changes in this pull request diff (this is the code that changed between the PR branch and the base branch) focusing on these areas:
+You are an AI code reviewer. Review the following PR diff and provide concise, actionable feedback.
 
-        1. Code Quality & Best Practices
-          - Are there any violations of common coding standards or patterns?
-          - Is the code readable, maintainable, and properly organized?
-          - Are variable/function names clear and descriptive?
-          - Is there any duplicated code that could be refactored?
+Focus on:
+1. Potential bugs, security issues, or breaking changes
+2. Code quality and best practices  
+3. Missing error handling or edge cases
+4. Performance concerns
+5. Missing tests for non-trivial logic
 
-        2. Potential Bugs or Issues
-          - Are there any logical errors or edge cases not handled?
-          - Are null/undefined checks in place where needed?
-          - Are there any type mismatches or incorrect assumptions?
-          - Are error conditions properly handled?
+Please format your response in Markdown with:
+- ## Summary
+- ## Issues Found (if any)
+- ## Suggestions (if any)
+- ## Tests Needed (if any)
 
-        3. Performance Considerations
-          - Are there any inefficient algorithms or data structures?
-          - For frontend changes, are there unnecessary re-renders?
-          - Could any operations be optimized or cached?
-
-        4. Security Concerns
-          - Is user input properly validated and sanitized?
-          - Are there any exposed sensitive data or credentials?
-          - Are API endpoints properly authenticated/authorized?
-          - Are there any potential injection vulnerabilities?
-
-        5. Test Coverage
-          - Are the changes adequately tested?
-          - Are edge cases covered in tests?
-          - Do the tests actually verify the intended behavior?
-          - Are there any untested code paths?
-
-        Please provide constructive, specific feedback. For each issue found, explain why it's a problem and suggest how to fix it. Prioritize the most critical issues first.
-
-        Here is the PR diff:
-        EOF
-                  cat pr.diff >> prompt.txt
-                  echo "prompt_path=prompt.txt" >> $GITHUB_OUTPUT
-
-    - name: Truncate diff if too large
-      run: |
-        MAX_SIZE=100000  # bytes (~100KB)
-        if [ $(wc -c < pr.diff) -gt $MAX_SIZE ]; then
-          echo "⚠️ Diff too large, truncating to $MAX_SIZE bytes..."
-          head -c $MAX_SIZE pr.diff > truncated.diff
-          mv truncated.diff pr.diff
-        fi
-
-
+Here is the diff:
+EOF
+        cat pr.diff >> prompt.txt
+        echo "Prompt size: $(wc -c < prompt.txt) characters"
+        echo "prompt_path=prompt.txt" >> $GITHUB_OUTPUT
+    
     - name: Call Claude
       id: claude
       run: |
-        PROMPT_CONTENT=$(cat prompt.txt)
+        # Check if we have a diff to review
+        if [ ! -s pr.diff ]; then
+          echo "## No Changes Detected" > claude_review.md
+          echo "This PR appears to have no file changes to review." >> claude_review.md
+          exit 0
+        fi
+        
+        # Create the JSON payload properly
+        python3 << 'PYCODE'
+import json
+
+with open("prompt.txt", "r") as f:
+    prompt_content = f.read()
+
+payload = {
+    "model": "claude-3-5-sonnet-latest",
+    "max_tokens": 1500,
+    "messages": [
+        {
+            "role": "user",
+            "content": prompt_content
+        }
+    ]
+}
+
+with open("claude_payload.json", "w") as f:
+    json.dump(payload, f)
+PYCODE
+        
+        # Call Claude API
         RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
           -H "x-api-key: $ANTHROPIC_API_KEY" \
           -H "anthropic-version: 2023-06-01" \
           -H "content-type: application/json" \
-          -d @- <<EOF
-        {
-          "model": "claude-3-5-sonnet-latest",
-          "max_tokens": 1200,
-          "messages": [
-            {
-              "role": "user",
-              "content": "$PROMPT_CONTENT"
-            }
-          ]
-        }
-        EOF
-        )
+          -d @claude_payload.json)
+        
+        # Save raw response
         echo "$RESPONSE" > claude_raw.json
-        REVIEW=$(python - << 'PYCODE'
-        import json
-        with open("claude_raw.json") as f:
-            data = json.load(f)
-        text_parts = []
-        for c in data.get("content", []):
-            if c.get("type") == "text":
-                text_parts.append(c.get("text",""))
-        print("\n".join(text_parts))
-        PYCODE
-        )
-        echo "$REVIEW" > claude_review.md
-        REVIEW_ESCAPED=$(python - << 'PYCODE'
-        import json
-        text = open("claude_review.md").read()
-        print(json.dumps(text))
-        PYCODE
-        )
-        echo "review=$REVIEW_ESCAPED" >> $GITHUB_OUTPUT
+        echo "API response saved, size: $(wc -c < claude_raw.json) characters"
+        
+        # Extract review content with error handling
+        python3 << 'PYCODE'
+import json
+import sys
+
+try:
+    with open("claude_raw.json") as f:
+        data = json.load(f)
+    
+    # Check for API errors first
+    if "error" in data:
+        error_msg = data["error"].get("message", "Unknown error")
+        print(f"## ❌ Claude API Error\n\n{error_msg}")
+        with open("claude_review.md", "w") as f:
+            f.write(f"## ❌ Claude API Error\n\n{error_msg}")
+        sys.exit(0)
+    
+    # Extract text content from response
+    text_parts = []
+    for content_item in data.get("content", []):
+        if content_item.get("type") == "text":
+            text_parts.append(content_item.get("text", ""))
+    
+    review_text = "\n".join(text_parts).strip()
+    
+    if not review_text:
+        fallback_msg = "## ⚠️ No Review Generated\n\nClaude API returned an empty response."
+        print(fallback_msg)
+        with open("claude_review.md", "w") as f:
+            f.write(fallback_msg)
+    else:
+        print("Review extracted successfully")
+        with open("claude_review.md", "w") as f:
+            f.write(review_text)
+        
+except json.JSONDecodeError as e:
+    error_msg = f"## ❌ Failed to parse API response\n\n```\n{str(e)}\n```"
+    print(error_msg)
+    with open("claude_review.md", "w") as f:
+        f.write(error_msg)
+except Exception as e:
+    error_msg = f"## ❌ Unexpected error\n\n```\n{str(e)}\n```"
+    print(error_msg)
+    with open("claude_review.md", "w") as f:
+        f.write(error_msg)
+PYCODE
+        
+        echo "Review file size: $(wc -c < claude_review.md) characters"
+        echo "First 200 characters of review:"
+        head -c 200 claude_review.md
     
     - name: Comment on PR
       run: |
         PR_NUMBER=${{ github.event.pull_request.number }}
-        REVIEW_BODY=$(cat claude_review.md)
-        curl -s -X POST \
-          -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-          -H "Accept: application/vnd.github+json" \
-          https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-          -d "$(jq -n --arg body "$REVIEW_BODY" '{body: $body}')"
+        
+        # Verify we have review content
+        if [ ! -f claude_review.md ]; then
+          echo "❌ Review file not found"
+          exit 1
+        fi
+        
+        if [ ! -s claude_review.md ]; then
+          echo "❌ Review file is empty"
+          exit 1
+        fi
+        
+        # Post the comment
+        echo "Posting review comment to PR #$PR_NUMBER..."
+        
+        python3 << 'PYCODE'
+import json
+import subprocess
+import sys
+import os
+
+# Read the review content
+with open("claude_review.md", "r") as f:
+    review_body = f.read().strip()
+
+if not review_body:
+    print("❌ Review body is empty")
+    sys.exit(1)
+
+# Prepare the comment body with header
+comment_body = f"## 🤖 Claude AI Code Review\n\n{review_body}"
+
+# Prepare the GitHub API payload
+payload = {
+    "body": comment_body
+}
+
+# Get environment variables
+pr_number = os.environ.get("PR_NUMBER")
+github_token = os.environ.get("GITHUB_TOKEN") 
+repo = os.environ.get("GITHUB_REPOSITORY")
+
+if not all([pr_number, github_token, repo]):
+    print("❌ Missing required environment variables")
+    sys.exit(1)
+
+# Make the API call
+import urllib.request
+import urllib.parse
+
+url = f"https://api.github.com/repos/{repo}/issues/{pr_number}/comments"
+data = json.dumps(payload).encode('utf-8')
+
+req = urllib.request.Request(url, data=data)
+req.add_header('Authorization', f'Bearer {github_token}')
+req.add_header('Accept', 'application/vnd.github+json')
+req.add_header('Content-Type', 'application/json')
+
+try:
+    with urllib.request.urlopen(req) as response:
+        result = json.loads(response.read().decode('utf-8'))
+        print(f"✅ Comment posted successfully: {result.get('html_url', 'URL not available')}")
+except Exception as e:
+    print(f"❌ Failed to post comment: {str(e)}")
+    sys.exit(1)
+PYCODE
+      env:
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
