@@ -41,7 +41,6 @@ jobs:
         id: claude
         uses: anthropics/claude-code-base-action@beta
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           # this one ALWAYS runs the prompt — no trigger needed
           prompt: |
             You are a senior code reviewer. Review the following pull request diff.
@@ -90,6 +89,8 @@ jobs:
             --- END DIFF ---
           # we don't need tools for simple text review
           allowed_tools: ""
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+
 
       - name: Read Claude output
         id: read_claude
