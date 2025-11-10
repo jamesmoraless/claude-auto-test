@@ -170,7 +170,7 @@ jobs:
             // 2- collapse any older Claude comments (optional)
             for (const c of comments) {
               if (c.body && c.body.includes(marker) && !c.body.startsWith('<details>')) {
-                  const formattedDate = new Date(c.created_at).toLocaleDateString('en-US', {
+                const formattedDate = new Date(c.created_at).toLocaleDateString('en-US', {
                   month: '2-digit',
                   day: '2-digit',
                   year: 'numeric'
