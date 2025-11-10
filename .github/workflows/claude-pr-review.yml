@@ -32,59 +32,100 @@ jobs:
             mv pr.truncated.diff pr.diff
           fi
 
-          # expose diff as output (multi-line)
+          # expose diff as output
           echo "diff<<EOF" >> $GITHUB_OUTPUT
           cat pr.diff >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Generate review with Claude
+      - name: Run Claude review (base action)
         id: claude
-        continue-on-error: true
-        uses: anthropics/claude-code-action@beta
-        env:
-          MODE: agent
+        uses: anthropics/claude-code-base-action@beta
         with:
-          mode: agent
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          trigger_phrase: ""
-          label_trigger: ""
-          direct_prompt: |
+          # this one ALWAYS runs the prompt — no trigger needed
+          prompt: |
             You are a senior code reviewer. Review the following pull request diff.
-            Focus on:
-            1. Code Quality & Best Practices
-            2. Potential Bugs or Issues
-            3. Performance considerations
-            4. Security concerns
-            5. Test coverage gaps
+            Review the changes in my current git diff (staged and unstaged changes) focusing on these areas:
 
-            For each issue, explain why it's a problem and how to fix it.
-            Prioritize critical issues first.
-            Return Markdown.
+            1. **Code Quality & Best Practices**
+              - Are there any violations of common coding standards or patterns?
+              - Is the code readable, maintainable, and properly organized?
+              - Are variable/function names clear and descriptive?
+              - Is there any duplicated code that could be refactored?
+
+            2. **Potential Bugs or Issues**
+              - Are there any logical errors or edge cases not handled?
+              - Are null/undefined checks in place where needed?
+              - Are there any type mismatches or incorrect assumptions?
+              - Are error conditions properly handled?
+
+            3. **Performance Considerations**
+              - Are there any inefficient algorithms or data structures?
+              - Are there unnecessary re-renders (for React components)?
+              - Are there any memory leaks or resource management issues?
+              - Could any operations be optimized or cached?
+
+            4. **Security Concerns**
+              - Is user input properly validated and sanitized?
+              - Are there any exposed sensitive data or credentials?
+              - Are API endpoints properly authenticated/authorized?
+              - Are there any potential injection vulnerabilities?
+
+            5. **Test Coverage**
+              - Are the changes adequately tested?
+              - Are edge cases covered in tests?
+              - Do the tests actually verify the intended behavior?
+              - Are there any untested code paths?
+
+            Please review my git diff and provide constructive, specific feedback. For each issue found, explain why it's a problem and suggest how to fix it. Prioritize the most critical issues first.
+
+            Give me Markdown ONLY output with:
+            - Summary
+            - Issues (with severity)
+            - Suggestions
+            - Tests to add
 
             --- BEGIN DIFF ---
             ${{ steps.get_diff.outputs.diff }}
             --- END DIFF ---
+          # we don't need tools for simple text review
+          allowed_tools: ""
+
+      - name: Read Claude output
+        id: read_claude
+        run: |
+          # the base action gives us a JSON log file path in execution_file
+          FILE="${{ steps.claude.outputs.execution_file }}"
+          # default message in case file missing
+          MSG="Claude ran but didn't return a review. Check workflow logs."
+
+          if [ -f "$FILE" ]; then
+            # most runs put the final text in .final_response or .output
+            # so let's just dump the whole thing as markdown-ish
+            CONTENT=$(cat "$FILE")
+            echo "$CONTENT" > claude_review.md
+          else
+            echo "$MSG" > claude_review.md
+          fi
+
+          echo "review<<EOF" >> $GITHUB_OUTPUT
+          cat claude_review.md >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Comment on PR with review
         uses: actions/github-script@v7
         with:
-            github-token: ${{ secrets.GITHUB_TOKEN }}
-            script: |
-              const prNumber = context.payload.pull_request.number;
-              // the anthropics action usually returns something in 'steps.claude.outputs.result'
-              let body = core.getInput('body', { required: false });
-              // but we'll prefer the action's output
-              const claudeOutput = `${{ toJSON(steps.claude.outputs.result) }}`.trim();
-              let commentBody = claudeOutput;
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const body = `${{ toJSON(steps.read_claude.outputs.review) }}`.trim();
+            const commentBody = (!body || body === 'null' || body === '""')
+              ? "Claude ran but didn't return a review. Check workflow logs."
+              : body;
 
-              if (!claudeOutput || claudeOutput === 'null' || claudeOutput === '""') {
-                commentBody = "Claude ran but didn't return a review. Check workflow logs.";
-              }
-
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber,
-                body: commentBody
-              });
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: commentBody
+            });
