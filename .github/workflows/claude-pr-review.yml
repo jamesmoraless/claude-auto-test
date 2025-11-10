@@ -95,19 +95,32 @@ jobs:
       - name: Read Claude output
         id: read_claude
         run: |
-          # the base action gives us a JSON log file path in execution_file
-          FILE="${{ steps.claude.outputs.execution_file }}"
-          # default message in case file missing
-          MSG="Claude ran but didn't return a review. Check workflow logs."
+          FILE="/home/runner/work/_temp/claude-execution-output.json"
+          DEFAULT_MSG="Claude ran but didn't return a review. Check workflow logs."
 
-          if [ -f "$FILE" ]; then
-            # most runs put the final text in .final_response or .output
-            # so let's just dump the whole thing as markdown-ish
-            CONTENT=$(cat "$FILE")
-            echo "$CONTENT" > claude_review.md
-          else
-            echo "$MSG" > claude_review.md
-          fi
+          python - << 'PY'
+          import json, os, pathlib, sys
+
+          file_path = "/home/runner/work/_temp/claude-execution-output.json"
+          out_path = "claude_review.md"
+
+          text = ""
+          if os.path.exists(file_path):
+              data = json.load(open(file_path, "r", encoding="utf-8"))
+              # the action writes an array of events; the one we want has type == "result"
+              if isinstance(data, list):
+                  for item in data:
+                      if isinstance(item, dict) and item.get("type") == "result":
+                          # this is the final markdown Claude wrote
+                          text = item.get("result", "").strip()
+              elif isinstance(data, dict) and data.get("type") == "result":
+                  text = data.get("result", "").strip()
+
+          if not text:
+              text = "Claude ran but didn't return a review. Check workflow logs."
+
+          pathlib.Path(out_path).write_text(text, encoding="utf-8")
+          PY
 
           echo "review<<EOF" >> $GITHUB_OUTPUT
           cat claude_review.md >> $GITHUB_OUTPUT
@@ -119,14 +132,15 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const prNumber = context.payload.pull_request.number;
-            const body = `${{ toJSON(steps.read_claude.outputs.review) }}`.trim();
-            const commentBody = (!body || body === 'null' || body === '""')
+            // this is now just plain markdown text
+            const review = ${{ toJSON(steps.read_claude.outputs.review) }};
+            const body = (!review || review === "null" || review === '""')
               ? "Claude ran but didn't return a review. Check workflow logs."
-              : body;
+              : review;
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: prNumber,
-              body: commentBody
+              body
             });
