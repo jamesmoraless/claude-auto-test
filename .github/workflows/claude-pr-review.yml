@@ -2,132 +2,265 @@ name: Claude PR Review
 
 on:
   pull_request:
-    types: [opened, reopened, edited, synchronize]
+    types: [opened, reopened, synchronize]
+    paths-ignore:
+      - "**.md"             # ignore documentation
+      - "**.MD"
+      - "**.txt"
+      - "**.json"           # skip metadata/config updates if you want
+      - "**/docs/**"
+      - "**/CHANGELOG*"
+      - "**/LICENSE*"
+      - "**/README*"
+      - "**/test/**"        # optionally skip pure test-only changes
+      - "**/tests/**"
+      - "**/fixtures/**"
+
 
 permissions:
   contents: read
   pull-requests: write
-  issues: write
 
 jobs:
   claude-review:
     runs-on: ubuntu-latest
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-    
+
     steps:
-    - name: Checkout PR code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-    
-    - name: Get diff against base
-      id: diff
-      run: |
-        git fetch origin ${{ github.base_ref }} --depth=1
-        git diff origin/${{ github.base_ref }}...HEAD > pr.diff
-        echo "diff_path=pr.diff" >> $GITHUB_OUTPUT
-    
-    - name: Build prompt for Claude
-      id: prompt
-      run: |
-        cat << 'EOF' > prompt.txt
-        Review the changes in this pull request diff (this is the code that changed between the PR branch and the base branch) focusing on these areas:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-        1. Code Quality & Best Practices
-          - Are there any violations of common coding standards or patterns?
-          - Is the code readable, maintainable, and properly organized?
-          - Are variable/function names clear and descriptive?
-          - Is there any duplicated code that could be refactored?
+      - name: Get diff against base
+        id: get_diff
+        run: |
+          git fetch origin ${{ github.base_ref }} --depth=1
+          git diff origin/${{ github.base_ref }}...HEAD > pr.diff
 
-        2. Potential Bugs or Issues
-          - Are there any logical errors or edge cases not handled?
-          - Are null/undefined checks in place where needed?
-          - Are there any type mismatches or incorrect assumptions?
-          - Are error conditions properly handled?
+          # truncate for safety
+          MAX_SIZE=100000
+          if [ $(wc -c < pr.diff) -gt $MAX_SIZE ]; then
+            echo "⚠️ Diff too large, truncating..."
+            head -c $MAX_SIZE pr.diff > pr.truncated.diff
+            mv pr.truncated.diff pr.diff
+          fi
 
-        3. Performance Considerations
-          - Are there any inefficient algorithms or data structures?
-          - For frontend changes, are there unnecessary re-renders?
-          - Could any operations be optimized or cached?
+          # expose diff as output
+          echo "diff<<EOF" >> $GITHUB_OUTPUT
+          cat pr.diff >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+      
+      - name: Cache Claude CLI
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.claude
+            ~/.local/bin/claude
+          key: ${{ runner.os }}-claude-cli-v1
 
-        4. Security Concerns
-          - Is user input properly validated and sanitized?
-          - Are there any exposed sensitive data or credentials?
-          - Are API endpoints properly authenticated/authorized?
-          - Are there any potential injection vulnerabilities?
+      - name: Run Claude review (base action)
+        id: claude
+        uses: anthropics/claude-code-base-action@beta
+        with:
+          # this one ALWAYS runs the prompt — no trigger needed
+          prompt: |
+            <!-- claude-code-review -->
+            <!-- claude-code-review -->
+            You are a **senior web engineer** reviewing a pull request written primarily in **React, TypeScript, and Next.js**.
 
-        5. Test Coverage
-          - Are the changes adequately tested?
-          - Are edge cases covered in tests?
-          - Do the tests actually verify the intended behavior?
-          - Are there any untested code paths?
+            ## 🎯 Goal
+            Provide a thoughtful, high-value review focused on **clarity, maintainability, performance, accessibility, and reliability**.
+            Think like an experienced teammate — pragmatic, context-aware, and focused on meaningful improvements rather than rigid enforcement.
 
-        Please provide constructive, specific feedback. For each issue found, explain why it's a problem and suggest how to fix it. Prioritize the most critical issues first.
+            ## 🧩 How to Review
+            1. **Understand the intent** – briefly summarize what the change appears to do.
+            2. **Evaluate quality** – identify issues that could impact performance, scalability, or readability.
+            3. **Use judgment** – apply best practices, but balance them with the context of the codebase. Avoid “blanket” rules.
+            4. **Educate** – explain *why* something might be problematic and propose actionable, concise improvements.
+            5. **Prioritize** – highlight the top 3–5 insights that would create the biggest impact.
 
-        Here is the PR diff:
-        EOF
-                  cat pr.diff >> prompt.txt
-                  echo "prompt_path=prompt.txt" >> $GITHUB_OUTPUT
+            ---
 
-    - name: Truncate diff if too large
-      run: |
-        MAX_SIZE=100000  # bytes (~100KB)
-        if [ $(wc -c < pr.diff) -gt $MAX_SIZE ]; then
-          echo "⚠️ Diff too large, truncating to $MAX_SIZE bytes..."
-          head -c $MAX_SIZE pr.diff > truncated.diff
-          mv truncated.diff pr.diff
-        fi
+            ## ⚙️ State Management & Data Flow
+            - Encourage colocating state at the lowest reasonable level; avoid over-lifting state unless justified by shared logic.
+            - Avoid direct mutations — prefer immutable patterns.
+            - If state or props are passed too deeply, suggest Context or custom hooks when it clearly improves clarity.
+            - Prefer data-fetching libraries (React Query, SWR) over manual `fetch` calls in `useEffect` where scalability matters.
+            - Check that loading, error, and success states are handled clearly and predictably.
+
+            ---
+
+            ## ⚡ Performance & Rendering
+            - Look for preventable re-renders and suggest memoization (`React.memo`, `useCallback`, `useMemo`) where beneficial.
+            - Review hook dependency arrays for correctness.
+            - Ensure lists have stable keys — avoid using array indices when a unique id exists.
+            - Suggest virtualization only when list size or performance justifies it.
+            - Encourage dynamic imports and code-splitting when components are large or rarely used.
+
+            ---
+
+            ## 🧱 Component Design & Architecture
+            - Large, complex components should be considered for refactoring into smaller, focused ones.
+            - Encourage extraction of reusable logic into **custom hooks** when it improves readability or testability.
+            - Ensure component APIs are predictable, typed, and consistent.
+            - Suggest decoupling tightly bound components where it improves flexibility or reusability.
+
+            ---
+
+            ## 🧠 TypeScript Quality
+            - Minimize the use of `any` or overly broad types; justify them with comments when unavoidable.
+            - Ensure props, state, and API responses are clearly and correctly typed.
+            - Encourage using generics, utility types, and discriminated unions where they improve safety and clarity.
+            - Review shared types for consistency and centralized organization.
+
+            ---
+
+            ## 🧩 Error Handling & Edge Cases
+            - Ensure async operations use cleanup logic (`AbortController`, timeouts, unmount checks) where needed.
+            - Verify meaningful error and loading states — errors should guide recovery, not just say “Something went wrong.”
+            - Encourage proper error boundaries around critical UI.
+
+            ---
+
+            ## 🧪 Testing & Reliability
+            - Confirm tests validate **behavior** rather than implementation details.
+            - Suggest additional tests for critical edge cases, async logic, or user interactions.
+            - Encourage accessibility testing when UI components are complex or user-facing.
+
+            ---
+
+            ## ♿ Accessibility (A11y)
+            - Encourage semantic HTML and accessible components.
+            - Verify interactive elements are keyboard accessible.
+            - Suggest proper use of ARIA attributes and focus management where applicable.
+            - Note color contrast or reduced-motion concerns if visible.
+
+            ---
+
+            ## 🎨 Styling & Theming
+            - Promote consistent use of styling approach (Tailwind, CSS Modules, styled-components, etc.).
+            - Encourage responsive design and theming support (dark mode, accessibility preferences).
+            - Discourage inline styles or overly specific CSS that hurts maintainability.
+
+            ---
+
+            ## 🔒 Security
+            - Flag unsafe patterns like unsanitized `dangerouslySetInnerHTML`.
+            - Ensure API calls and environment variables follow secure practices.
+            - Encourage input validation and clear separation between server-only and client-side secrets.
+
+            ---
+
+            ## 🚀 Next.js Practices
+            - Check that data fetching methods (`getServerSideProps`, `getStaticProps`, etc.) are used correctly.
+            - Ensure API routes validate input and handle errors gracefully.
+            - Suggest using `next/image` and metadata for SEO and performance.
+
+            ---
+
+            ## 🧭 Code Organization & Maintainability
+            - Encourage feature-based folder structures and colocated tests.
+            - Suggest removing dead code, duplication, or temporary debugging logic.
+            - Emphasize clear naming and predictable file organization.
+            - Recommend simplifying or documenting complex logic when it aids future maintenance.
+
+            ---
+
+            ✅ Focus on **improving the codebase holistically**, not enforcing absolute rules.  
+            ✅ The best reviews balance **technical correctness**, **developer empathy**, and **contextual trade-offs**.
+
+            Give me Markdown ONLY output with:
+            - Summary
+            - Issues (with severity)
+            - Suggestions
+            - Tests to add
+
+            --- BEGIN DIFF ---
+            ${{ steps.get_diff.outputs.diff }}
+            --- END DIFF ---
+          # we don't need tools for simple text review
+          allowed_tools: ""
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 
 
-    - name: Call Claude
-      id: claude
-      run: |
-        PROMPT_CONTENT=$(cat prompt.txt)
-        RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
-          -H "x-api-key: $ANTHROPIC_API_KEY" \
-          -H "anthropic-version: 2023-06-01" \
-          -H "content-type: application/json" \
-          -d @- <<EOF
-        {
-          "model": "claude-3-5-sonnet-latest",
-          "max_tokens": 1200,
-          "messages": [
-            {
-              "role": "user",
-              "content": "$PROMPT_CONTENT"
+      - name: Read Claude output
+        id: read_claude
+        run: |
+          FILE="/home/runner/work/_temp/claude-execution-output.json"
+          OUTFILE="claude_review.md"
+          DEFAULT_MSG="Claude ran but didn't return a review. Check workflow logs."
+
+          python - << 'PY'
+          import json, os, pathlib
+
+          file_path = "/home/runner/work/_temp/claude-execution-output.json"
+          out_path = "claude_review.md"
+
+          text = ""
+          if os.path.exists(file_path):
+              data = json.load(open(file_path, "r", encoding="utf-8"))
+              # the action writes an array of events; the one we want has type == "result"
+              if isinstance(data, list):
+                  for item in data:
+                      if isinstance(item, dict) and item.get("type") == "result":
+                          text = item.get("result", "").strip()
+              elif isinstance(data, dict) and data.get("type") == "result":
+                  text = data.get("result", "").strip()
+
+          if not text:
+              raw = open(file_path, "r", encoding="utf-8").read()[:200]
+              text = "Claude ran but didn't return a review.\n\nRaw snippet:\n```json\n" + raw + "\n```"
+
+          pathlib.Path(out_path).write_text(text, encoding="utf-8")
+          PY
+
+          # now safely base64 it so we can pass via outputs
+          REVIEW_B64=$(base64 -w 0 claude_review.md)
+          echo "review_b64=${REVIEW_B64}" >> $GITHUB_OUTPUT
+
+
+      - name: Post / update Claude review comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber = context.payload.pull_request.number;
+            const marker = '<!-- claude-pr-review -->';
+            const b64 = `${{ steps.read_claude.outputs.review_b64 }}`.trim();
+            const review = Buffer.from(b64, 'base64').toString('utf8').trim();
+
+            // 1- get existing comments
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber
+            });
+
+            // 2- collapse any older Claude comments (optional)
+            for (const c of comments) {
+              if (c.body && c.body.includes(marker) && !c.body.startsWith('<details>')) {
+                const formattedDate = new Date(c.created_at).toLocaleDateString('en-US', {
+                  month: '2-digit',
+                  day: '2-digit',
+                  year: 'numeric'
+                });
+                const collapsed = `<details>\n<summary>Previous Claude review (${formattedDate})</summary>\n\n${c.body}\n</details>`;
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: c.id,
+                  body: collapsed
+                });
+              }
             }
-          ]
-        }
-        EOF
-        )
-        echo "$RESPONSE" > claude_raw.json
-        REVIEW=$(python - << 'PYCODE'
-        import json
-        with open("claude_raw.json") as f:
-            data = json.load(f)
-        text_parts = []
-        for c in data.get("content", []):
-            if c.get("type") == "text":
-                text_parts.append(c.get("text",""))
-        print("\n".join(text_parts))
-        PYCODE
-        )
-        echo "$REVIEW" > claude_review.md
-        REVIEW_ESCAPED=$(python - << 'PYCODE'
-        import json
-        text = open("claude_review.md").read()
-        print(json.dumps(text))
-        PYCODE
-        )
-        echo "review=$REVIEW_ESCAPED" >> $GITHUB_OUTPUT
-    
-    - name: Comment on PR
-      run: |
-        PR_NUMBER=${{ github.event.pull_request.number }}
-        REVIEW_BODY=$(cat claude_review.md)
-        curl -s -X POST \
-          -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-          -H "Accept: application/vnd.github+json" \
-          https://api.github.com/repos/${{ github.repository }}/issues/$PR_NUMBER/comments \
-          -d "$(jq -n --arg body "$REVIEW_BODY" '{body: $body}')"
+
+            // 3- see if we already have a "live" comment (after collapsing, we won't — so just create)
+            const body = `${marker}\n${review || "Claude ran but didn't return a review."}`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body
+            });
+
